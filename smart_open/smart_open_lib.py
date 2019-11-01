@@ -38,6 +38,7 @@ from six.moves.urllib import parse as urlparse
 # smart_open.submodule to reference to the submodules.
 #
 import smart_open.s3 as smart_open_s3
+import smart_open.gcs as smart_open_gcs
 import smart_open.hdfs as smart_open_hdfs
 import smart_open.webhdfs as smart_open_webhdfs
 import smart_open.http as smart_open_http
@@ -62,6 +63,8 @@ SYSTEM_ENCODING = sys.getdefaultencoding()
 _ISSUE_189_URL = 'https://github.com/RaRe-Technologies/smart_open/issues/189'
 
 _DEFAULT_S3_HOST = 's3.amazonaws.com'
+
+_DEFAULT_GCS_HOST = 'storage.cloud.google.com'
 
 _COMPRESSOR_REGISTRY = {}
 
@@ -368,6 +371,10 @@ open.__doc__ = open.__doc__ % {
         doctools.extract_kwargs(smart_open_s3.open.__doc__),
         lpad=u'    ',
     ),
+    'gcs': doctools.to_docstring(
+        doctools.extract_kwargs(smart_open_gcs.open.__doc__),
+        lpad=u'    ',
+    ),
     'http': doctools.to_docstring(
         doctools.extract_kwargs(smart_open_http.open.__doc__),
         lpad=u'    ',
@@ -558,6 +565,8 @@ def _open_binary_stream(uri, mode, transport_params):
             return fobj, filename
         elif parsed_uri.scheme in smart_open_s3.SUPPORTED_SCHEMES:
             return _s3_open_uri(parsed_uri, mode, transport_params), filename
+        elif parsed_uri.scheme in smart_open_gcs.SUPPORTED_SCHEMES:
+            return _gcs_open_uri(parsed_uri, mode, transport_params), filename
         elif parsed_uri.scheme == "hdfs":
             _check_kwargs(smart_open_hdfs.open, transport_params)
             return smart_open_hdfs.open(parsed_uri.uri_path, mode), filename
@@ -631,6 +640,52 @@ def _s3_open_uri(uri, mode, transport_params):
 
     kwargs = _check_kwargs(smart_open_s3.open, transport_params)
     return smart_open_s3.open(uri.bucket_id, uri.key_id, mode, **kwargs)
+
+
+def _gcs_open_uri(uri, mode, transport_params):
+    logger.debug('gcs_open_uri: %r', locals())
+    if mode in ('r', 'w'):
+        raise ValueError('this function can only open binary streams. '
+                         'Use smart_open.smart_open() to open text streams.')
+    elif mode not in ('rb', 'wb'):
+        raise NotImplementedError('unsupported mode: %r', mode)
+
+    #
+    # There are two explicit ways we can receive client parameters from the user.
+    #
+    # 1. Via the client keyword argument (transport_params)
+    # 2. Via the URI itself
+    #
+    # They are not mutually exclusive, but we have to pick one of the two.
+    # Go with 1).
+    #
+    if transport_params.get('client') is not None and (uri.access_id or uri.access_secret):
+        logger.warning(
+            'ignoring credentials parsed from URL because they conflict with '
+            'transport_params.client. Set transport_params.client to None '
+            'to suppress this warning.'
+        )
+    elif (uri.access_id and uri.access_secret):
+        transport_params['client'] = boto3.Session(
+            aws_access_key_id=uri.access_id,
+            aws_secret_access_key=uri.access_secret,
+        )
+
+    #
+    # There are two explicit ways the user can provide the endpoint URI:
+    #
+    # 1. Via the URL.  The protocol is implicit, and we assume HTTPS in this case.
+    # 2. Via the resource_kwargs and multipart_upload_kwargs endpoint_url parameter.
+    #
+    # Again, these are not mutually exclusive: the user can specify both.  We
+    # have to pick one to proceed, however, and we go with 2.
+    #
+    if uri.host != _DEFAULT_GCS_HOST:
+        endpoint_url = 'https://%s:%d' % (uri.host, uri.port)
+        _override_endpoint_url(transport_params, endpoint_url)
+
+    kwargs = _check_kwargs(smart_open_gcs.open, transport_params)
+    return smart_open_gcs.open(uri.bucket_id, uri.key_id, mode, **kwargs)
 
 
 def _override_endpoint_url(tp, url):
